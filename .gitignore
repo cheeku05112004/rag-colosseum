@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+app_backup.py
+load_test.py
+test.py
+search_test.py
