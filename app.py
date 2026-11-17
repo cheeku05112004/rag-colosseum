@@ -191,6 +191,12 @@ def query(request: QueryRequest):
         }
 
     # Step 3: Search for the best sentence inside those passages.
+    numeric_intent = bool(re.search(
+        r"\b(how many|how much|what number|number of|how long|how often)\b",
+        question,
+        flags=re.IGNORECASE
+    ))
+
     candidates = []
 
     for pid, passage_score, passage_lexical in candidate_passages:
@@ -216,12 +222,18 @@ def query(request: QueryRequest):
             if detail_tokens.intersection(sentence_tokens):
                 keyword_bonus = 0.20
 
+            numeric_bonus = 0.25 if (
+                numeric_intent
+                and re.search(r"\b\d+(?:\.\d+)?\b", sentence)
+            ) else 0.0
+
             final_score = (
                 0.25 * dense
                 + 0.35 * lexical
                 + 0.10 * passage_lexical
                 + 0.10 * keyword_coverage
                 + keyword_bonus
+                + numeric_bonus
             )
 
             candidates.append({
@@ -241,6 +253,10 @@ def query(request: QueryRequest):
     best_sentence_score = candidates[0]["score"]
 
     for item in candidates:
+        # Numeric questions need one precise answer sentence.
+        if numeric_intent and selected:
+            break
+
         if item["score"] < best_sentence_score - 0.10:
             continue
 
