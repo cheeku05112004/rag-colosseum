@@ -29,7 +29,7 @@ def tokenize(text):
     result = []
 
     for word in words:
-        if word.endswith("s") and len(word) > 4:
+        if word.endswith("s") and (len(word) > 4 or word == "keys"):
             word = word[:-1]
         if word not in STOPWORDS:
             result.append(word)
@@ -243,11 +243,24 @@ def query(request: QueryRequest):
                 "sentence": sentence,
                 "source": pid,
                 "score": final_score,
-                "passage_score": passage_score
+                "passage_score": passage_score,
+                "keyword_coverage": keyword_coverage
             })
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
+    # Abstain when a multi-keyword question has insufficient
+    # lexical evidence in the best matching sentence.
+    detail_token_count = len(set(tokenize(detail_question)))
+    best_keyword_coverage = candidates[0]["keyword_coverage"]
+
+    if detail_token_count >= 4 and best_keyword_coverage < 0.40:
+        return {
+            "answer": None,
+            "sources": [],
+            "scores": [],
+            "confidence": 0.20
+        }
 
     # Step 4: Select relevant sentences, avoiding duplicate sources.
     selected = []
@@ -281,6 +294,34 @@ def query(request: QueryRequest):
         }
 
     answer = " ".join(item["sentence"] for item in selected)
+
+    asks_lease = bool(re.search(r"\blease(s)?\b", question, re.IGNORECASE))
+    asks_timing = bool(re.search(
+        r"\b(interval|period|frequency|duration|how long)\b",
+        question,
+        re.IGNORECASE
+    ))
+
+    has_time_value = bool(re.search(
+        r"\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b",
+        answer,
+        re.IGNORECASE
+    ))
+
+    lease_supported = (
+        not asks_lease
+        or bool(re.search(r"\blease(s)?\b", answer, re.IGNORECASE))
+    )
+
+    timing_supported = not asks_timing or has_time_value
+
+    if not lease_supported or not timing_supported:
+        return {
+            "answer": None,
+            "sources": [],
+            "scores": [],
+            "confidence": 0.20
+        }
     sources = [item["source"] for item in selected]
     scores = [round(item["score"], 4) for item in selected]
 
