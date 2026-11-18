@@ -158,13 +158,37 @@ def query(request: QueryRequest):
         if word.lower() not in ignored
     ]
 
-    # Remove topic names from the sentence-level detail query.
+    # Expand known acronyms before sentence-level lexical matching.
     detail_question = question
 
+    detail_expansions = {
+        "tcp": " ",
+        "mvcc": "multi version concurrency control",
+        "wal": "write ahead log",
+        "sgd": "stochastic gradient descent",
+        "svm": "support vector machine",
+        "mlp": "multi layer perceptron",
+        "resnet": "residual convolutional network",
+        "hlc": "hybrid logical clock",
+        "dns": "domain name system",
+        "mdns": "multicast dns",
+        "lsm": "log structured merge tree",
+        "tls": "transport layer security",
+        "aes": "advanced encryption standard",
+        "jwt": "json web token",
+        "pkce": "proof key for code exchange",
+        "ecc": "elliptic curve cryptography",
+        "2pc": "two phase commit",
+        "3pc": "three phase commit",
+        "sqli": "sql injection",
+        "xss": "cross site scripting"
+    }
+
     for anchor in anchors:
+        replacement = detail_expansions.get(anchor, " ")
         detail_question = re.sub(
             rf"\b{re.escape(anchor)}\b",
-            " ",
+            replacement,
             detail_question,
             flags=re.IGNORECASE
         )
@@ -174,7 +198,26 @@ def query(request: QueryRequest):
 
     if anchors:
         anchor_aliases = {
-            "tcp": {"transmission", "control", "protocol"}
+            "tcp": {"transmission", "control", "protocol"},
+            "mvcc": {"multi", "version", "concurrency", "control"},
+            "wal": {"write", "ahead", "log"},
+            "sgd": {"stochastic", "gradient", "descent"},
+            "svm": {"support", "vector", "machine"},
+            "mlp": {"multi", "layer", "perceptron"},
+            "resnet": {"residual", "convolutional", "network"},
+            "hlc": {"hybrid", "logical", "clock"},
+            "dns": {"domain", "name", "system"},
+            "mdns": {"multicast", "dns"},
+            "lsm": {"log", "structured", "merge", "tree"},
+            "tls": {"transport", "layer", "security"},
+            "aes": {"advanced", "encryption", "standard"},
+            "jwt": {"json", "web", "token"},
+            "pkce": {"proof", "key", "code", "exchange"},
+            "ecc": {"elliptic", "curve", "cryptography"},
+            "2pc": {"two", "phase", "commit"},
+            "3pc": {"three", "phase", "commit"},
+            "sqli": {"sql", "injection"},
+            "xss": {"cross", "site", "scripting"}
         }
 
         anchored = [
@@ -227,6 +270,25 @@ def query(request: QueryRequest):
         re.IGNORECASE
     )
 
+    protection_intent = bool(re.search(
+        r"\b(?:protect|protection|defend|safeguard)\b.*\bagainst\b",
+        question,
+        re.IGNORECASE
+    ))
+
+    protection_action_pattern = re.compile(
+        r"\b(?:protect(?:s|ed|ing)?|prevent(?:s|ed|ing)?|"
+        r"eliminat(?:e|es|ed|ing)|block(?:s|ed|ing)|"
+        r"mitigat(?:e|es|ed|ing)|defend(?:s|ed|ing)|secure(?:s|d|ing))\b",
+        re.IGNORECASE
+    )
+
+    protection_target_pattern = re.compile(
+        r"\b(?:attacks?|interception|intrusion|exploitation|"
+        r"unauthorized access|replay|injection|credential theft)\b",
+        re.IGNORECASE
+    )
+
     candidates = []
 
     for pid, passage_score, passage_lexical in candidate_passages:
@@ -252,6 +314,31 @@ def query(request: QueryRequest):
             if detail_tokens.intersection(sentence_tokens):
                 keyword_bonus = 0.20
 
+            definition_intent = bool(re.search(
+                r"\bwhat\s+(?:does|do)\b.*\b(?:provide|mean|represent|refer|stand\s+for)\b"
+                r"|\b(?:define|meaning\s+of|definition\s+of)\b",
+                question,
+                re.IGNORECASE
+            ))
+
+            definition_bonus = 0.20 if (
+                definition_intent
+                and re.search(
+                    r"\b(?:provide|provides|mean|means|refer(?:s)?\s+to|"
+                    r"represent(?:s)?|stand(?:s)?\s+for)\b",
+                    sentence,
+                    re.IGNORECASE
+                )
+            ) else 0.0
+
+            protection_evidence = (
+                protection_intent
+                and bool(protection_action_pattern.search(sentence))
+                and bool(protection_target_pattern.search(sentence))
+            )
+
+            protection_bonus = 0.45 if protection_evidence else 0.0
+
             numeric_bonus = 0.25 if (
                 numeric_intent
                 and re.search(r"\b\d+(?:\.\d+)?\b", sentence)
@@ -263,6 +350,8 @@ def query(request: QueryRequest):
                 + 0.10 * passage_lexical
                 + 0.10 * keyword_coverage
                 + keyword_bonus
+                + definition_bonus
+                + protection_bonus
                 + numeric_bonus
             )
 
@@ -271,7 +360,8 @@ def query(request: QueryRequest):
                 "source": pid,
                 "score": final_score,
                 "passage_score": passage_score,
-                "keyword_coverage": keyword_coverage
+                "keyword_coverage": keyword_coverage,
+                "protection_evidence": protection_evidence
             })
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -322,7 +412,13 @@ def query(request: QueryRequest):
     detail_token_count = len(set(tokenize(detail_question)))
     best_keyword_coverage = candidates[0]["keyword_coverage"]
 
-    if detail_token_count >= 4 and best_keyword_coverage < 0.40:
+    best_has_protection_evidence = candidates[0]["protection_evidence"]
+
+    if (
+        detail_token_count >= 4
+        and best_keyword_coverage < 0.40
+        and not best_has_protection_evidence
+    ):
         return {
             "answer": None,
             "sources": [],
