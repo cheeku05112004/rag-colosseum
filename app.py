@@ -173,9 +173,22 @@ def query(request: QueryRequest):
     candidate_pool = passage_results
 
     if anchors:
+        anchor_aliases = {
+            "tcp": {"transmission", "control", "protocol"}
+        }
+
         anchored = [
             item for item in passage_results
-            if all(anchor in tokenize(PASSAGES[item[0]]) for anchor in anchors)
+            if all(
+                anchor in tokenize(PASSAGES[item[0]])
+                or (
+                    anchor in anchor_aliases
+                    and anchor_aliases[anchor].issubset(
+                        set(tokenize(PASSAGES[item[0]]))
+                    )
+                )
+                for anchor in anchors
+            )
         ]
 
         if anchored:
@@ -199,6 +212,20 @@ def query(request: QueryRequest):
         question,
         flags=re.IGNORECASE
     ))
+
+    asks_timeout = bool(re.search(
+        r"\b(timeout|timeouts|time-out|time-outs|rto)\b",
+        question,
+        re.IGNORECASE
+    ))
+
+    timeout_value_pattern = re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)"
+        r"(?:\s+[a-z-]+){0,3}\s+(?:timeout|timeouts|time-out|time-outs|rto)\b"
+        r"|\b(?:timeout|timeouts|time-out|time-outs|rto)(?:\s+[a-z-]+){0,3}"
+        r"\s+\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b",
+        re.IGNORECASE
+    )
 
     candidates = []
 
@@ -248,6 +275,47 @@ def query(request: QueryRequest):
             })
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    if asks_timeout:
+        timeout_candidates = [
+            item for item in candidates
+            if timeout_value_pattern.search(item["sentence"])
+        ]
+
+        if not timeout_candidates:
+            return {
+                "answer": None,
+                "sources": [],
+                "scores": [],
+                "confidence": 0.20
+            }
+
+        candidates = timeout_candidates
+
+    # TCP retransmission timeout specifically maps to the RTO evidence.
+    asks_tcp_retransmission = bool(re.search(
+        r"\btcp\b",
+        question,
+        re.IGNORECASE
+    )) and bool(re.search(
+        r"\bretransmission\b",
+        question,
+        re.IGNORECASE
+    ))
+
+    if asks_tcp_retransmission and asks_timeout:
+        candidates = [
+            item for item in candidates
+            if re.search(r"\brto\b", item["sentence"], re.IGNORECASE)
+        ]
+
+        if not candidates:
+            return {
+                "answer": None,
+                "sources": [],
+                "scores": [],
+                "confidence": 0.20
+            }
 
     # Abstain when a multi-keyword question has insufficient
     # lexical evidence in the best matching sentence.
@@ -315,7 +383,11 @@ def query(request: QueryRequest):
 
     timing_supported = not asks_timing or has_time_value
 
-    if not lease_supported or not timing_supported:
+    timeout_supported = (
+        not asks_timeout or bool(timeout_value_pattern.search(answer))
+    )
+
+    if not lease_supported or not timing_supported or not timeout_supported:
         return {
             "answer": None,
             "sources": [],
