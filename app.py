@@ -50,34 +50,37 @@ def normalize(vectors):
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     return vectors / np.maximum(norms, 1e-12)
 
-print("Loading embedding model...")
-model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-
-# Keep sentences connected to their original passage.
+# Build sentence-to-passage mapping without generating embeddings.
 SENTENCES = []
 SENTENCE_SOURCES = []
 
 for passage_id, passage in enumerate(PASSAGES):
     parts = re.split(r'(?<=[.!?])\s+', passage.strip())
-
     for sentence in parts:
         if sentence:
             SENTENCES.append(sentence)
             SENTENCE_SOURCES.append(passage_id)
 
-print("Generating passage embeddings...")
-passage_vectors = normalize(
-    np.array(list(model.embed(PASSAGES)), dtype=np.float32)
-)
+# Load precomputed embeddings instead of generating them at startup.
+passage_vectors = np.load("embeddings.npy").astype(np.float32)
+sentence_vectors = np.load("sentence_embeddings.npy").astype(np.float32)
 
-print("Generating sentence embeddings...")
-sentence_vectors = normalize(
-    np.array(list(model.embed(SENTENCES)), dtype=np.float32)
-)
+if passage_vectors.shape[0] != len(PASSAGES):
+    raise RuntimeError("Passage embedding count mismatch")
 
-print("RAG system ready!")
-print("Passages:", len(PASSAGES))
-print("Sentences:", len(SENTENCES))
+if sentence_vectors.shape[0] != len(SENTENCES):
+    raise RuntimeError("Sentence embedding count mismatch")
+
+model = None
+
+@app.on_event("startup")
+def load_embedding_model():
+    global model
+    print("Loading embedding model...")
+    model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+    print("RAG system ready!")
+    print("Passages:", len(PASSAGES))
+    print("Sentences:", len(SENTENCES))
 
 
 class QueryRequest(BaseModel):
