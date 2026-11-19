@@ -491,7 +491,10 @@ def query(request: QueryRequest):
             "confidence": 0.20
         }
     sources = [item["source"] for item in selected]
-    scores = [round(item["score"], 4) for item in selected]
+    scores = [
+        round(min(1.0, max(0.0, float(item["score"]))), 4)
+        for item in selected
+    ]
 
     # Confidence is based on the best selected evidence score.
     confidence = min(0.95, max(0.61, best_sentence_score))
