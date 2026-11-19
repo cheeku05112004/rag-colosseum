@@ -170,7 +170,7 @@ def query(request: QueryRequest):
         "mlp": "multi layer perceptron",
         "resnet": "residual convolutional network",
         "hlc": "hybrid logical clock",
-        "dns": "domain name system",
+        "dns": " ",
         "mdns": "multicast dns",
         "lsm": "log structured merge tree",
         "tls": "transport layer security",
@@ -341,7 +341,12 @@ def query(request: QueryRequest):
 
             numeric_bonus = 0.25 if (
                 numeric_intent
-                and re.search(r"\b\d+(?:\.\d+)?\b", sentence)
+                and re.search(
+                    r"(?<![A-Za-z0-9_])\d+(?:\.\d+)?"
+                    r"(?:\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?))?\b",
+                    sentence,
+                    re.IGNORECASE
+                )
             ) else 0.0
 
             final_score = (
@@ -467,7 +472,7 @@ def query(request: QueryRequest):
     ))
 
     has_time_value = bool(re.search(
-        r"\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b",
+        r"(?<![A-Za-z0-9_])\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b",
         answer,
         re.IGNORECASE
     ))
