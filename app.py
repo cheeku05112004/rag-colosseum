@@ -106,13 +106,38 @@ def health():
 def query(request: QueryRequest):
     question = request.question.strip()
 
-    # Remove common prompt-injection instructions before retrieval.
+    # Remove instruction overrides while preserving legitimate questions.
     question = re.sub(
-        r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions[^.?!]*[.?!]?",
+        r"\b(?:system|developer)\s+override\b.*$",
         "",
         question,
         flags=re.IGNORECASE
-    ).strip()
+    )
+
+    question = re.sub(
+        r"^\s*(?:ignore|disregard|forget)\s+(?:all\s+)?(?:the\s+)?"
+        r"(?:previous|prior|above)\s+instructions?\s*"
+        r"(?:[,;:.!?—-]+\s*)?(?:and\s+)?",
+        "",
+        question,
+        flags=re.IGNORECASE
+    )
+
+    question = re.split(
+        r"\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:the\s+)?"
+        r"(?:previous|prior|above)\s+instructions?\b",
+        question,
+        maxsplit=1,
+        flags=re.IGNORECASE
+    )[0]
+
+    question = re.split(
+        r"\b(?:reveal|print|show|disclose)\s+(?:the\s+)?"
+        r"(?:hidden|system|developer)\s+(?:prompt|instructions?)\b",
+        question,
+        maxsplit=1,
+        flags=re.IGNORECASE
+    )[0].strip(" \t,;:-")
     top_k = request.top_k
 
     if not question:
@@ -146,17 +171,18 @@ def query(request: QueryRequest):
     passage_results.sort(key=lambda x: x[1], reverse=True)
 
     # Give named topics such as Raft and SWIM priority.
-    capitalized = re.findall(r"\b[A-Z][a-zA-Z0-9]*\b", question)
+    capitalized = re.findall(r"\b[A-Z][a-zA-Z0-9]*(?:-[A-Z][a-zA-Z0-9]*)*\b", question)
 
     ignored = {
         "what", "which", "who", "where", "when",
-        "why", "how", "explain", "tell"
+        "why", "how", "explain", "tell",
+        "compare", "contrast", "versus", "between", "multi"
     }
 
-    anchors = [
+    anchors = list(dict.fromkeys(
         word.lower() for word in capitalized
         if word.lower() not in ignored
-    ]
+    ))
 
     # Expand known acronyms before sentence-level lexical matching.
     detail_question = question
@@ -195,6 +221,7 @@ def query(request: QueryRequest):
 
     # If a named topic exists, search passages containing that topic.
     candidate_pool = passage_results
+    anchor_passage_ids = {}
 
     if anchors:
         anchor_aliases = {
@@ -220,22 +247,64 @@ def query(request: QueryRequest):
             "xss": {"cross", "site", "scripting"}
         }
 
-        anchored = [
-            item for item in passage_results
-            if all(
-                anchor in tokenize(PASSAGES[item[0]])
-                or (
-                    anchor in anchor_aliases
-                    and anchor_aliases[anchor].issubset(
-                        set(tokenize(PASSAGES[item[0]]))
-                    )
-                )
-                for anchor in anchors
-            )
-        ]
+        def passage_matches_anchor(item, anchor):
+            passage_tokens = set(tokenize(PASSAGES[item[0]]))
+            normalized_anchor = set(tokenize(anchor))
 
-        if anchored:
-            candidate_pool = anchored
+            direct_match = (
+                bool(normalized_anchor)
+                and normalized_anchor.issubset(passage_tokens)
+            )
+
+            alias_match = (
+                anchor in anchor_aliases
+                and anchor_aliases[anchor].issubset(passage_tokens)
+            )
+
+            if anchor in anchor_aliases:
+                alias_exists = any(
+                    anchor_aliases[anchor].issubset(
+                        set(tokenize(PASSAGES[other[0]]))
+                    )
+                    for other in passage_results
+                )
+                if alias_exists:
+                    return alias_match
+
+            return direct_match or alias_match
+
+        if len(anchors) == 1:
+            anchored = [
+                item for item in passage_results
+                if passage_matches_anchor(item, anchors[0])
+            ]
+
+            if anchored:
+                candidate_pool = anchored
+
+        else:
+            # Keep relevant passages for each named topic.
+            anchor_hits = {}
+
+            for anchor in anchors:
+                matches = [
+                    item for item in passage_results
+                    if passage_matches_anchor(item, anchor)
+                ]
+
+                anchor_passage_ids[anchor] = {
+                    item[0] for item in matches[:2]
+                }
+
+                for item in matches[:2]:
+                    anchor_hits[item[0]] = item
+
+            if anchor_hits:
+                candidate_pool = sorted(
+                    anchor_hits.values(),
+                    key=lambda item: item[1],
+                    reverse=True
+                )
 
     candidate_passages = candidate_pool[:8]
 
@@ -339,6 +408,18 @@ def query(request: QueryRequest):
 
             protection_bonus = 0.45 if protection_evidence else 0.0
 
+            quorum_intent = bool(re.search(
+                r"\bquorums?\b", question, re.IGNORECASE
+            ))
+
+            quorum_evidence = bool(re.search(
+                r"\bquorums?\b", sentence, re.IGNORECASE
+            ))
+
+            quorum_bonus = (
+                0.45 if quorum_intent and quorum_evidence else 0.0
+            )
+
             numeric_bonus = 0.25 if (
                 numeric_intent
                 and re.search(
@@ -357,6 +438,7 @@ def query(request: QueryRequest):
                 + keyword_bonus
                 + definition_bonus
                 + protection_bonus
+                + quorum_bonus
                 + numeric_bonus
             )
 
@@ -371,11 +453,32 @@ def query(request: QueryRequest):
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
+    multi_topic_request = (
+        len(anchors) >= 2
+        and bool(re.search(
+            r"\b(?:and|versus|vs\.?|compare|contrast|between)\b",
+            question,
+            re.IGNORECASE
+        ))
+    )
+
+    duration_value_pattern = re.compile(
+        r"(?<![A-Za-z0-9_])\d+(?:\.\d+)?\s*"
+        r"(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b",
+        re.IGNORECASE
+    )
+
     if asks_timeout:
-        timeout_candidates = [
-            item for item in candidates
-            if timeout_value_pattern.search(item["sentence"])
-        ]
+        if multi_topic_request:
+            timeout_candidates = [
+                item for item in candidates
+                if duration_value_pattern.search(item["sentence"])
+            ]
+        else:
+            timeout_candidates = [
+                item for item in candidates
+                if timeout_value_pattern.search(item["sentence"])
+            ]
 
         if not timeout_candidates:
             return {
@@ -398,7 +501,11 @@ def query(request: QueryRequest):
         re.IGNORECASE
     ))
 
-    if asks_tcp_retransmission and asks_timeout:
+    if (
+        asks_tcp_retransmission
+        and asks_timeout
+        and not multi_topic_request
+    ):
         candidates = [
             item for item in candidates
             if re.search(r"\brto\b", item["sentence"], re.IGNORECASE)
@@ -411,6 +518,19 @@ def query(request: QueryRequest):
                 "scores": [],
                 "confidence": 0.20
             }
+
+    asks_quorum = bool(re.search(
+        r"\bquorums?\b", question, re.IGNORECASE
+    ))
+
+    if asks_quorum:
+        quorum_candidates = [
+            item for item in candidates
+            if re.search(r"\bquorums?\b", item["sentence"], re.IGNORECASE)
+        ]
+
+        if quorum_candidates:
+            candidates = quorum_candidates
 
     # Abstain when a multi-keyword question has insufficient
     # lexical evidence in the best matching sentence.
@@ -437,22 +557,47 @@ def query(request: QueryRequest):
 
     best_sentence_score = candidates[0]["score"]
 
-    for item in candidates:
-        # Numeric questions need one precise answer sentence.
-        if numeric_intent and selected:
-            break
+    selection_margin = 0.25 if multi_topic_request else 0.10
 
-        if item["score"] < best_sentence_score - 0.10:
-            continue
+    if multi_topic_request and anchor_passage_ids:
+        for anchor in anchors:
+            matching_sources = anchor_passage_ids.get(anchor, set())
 
-        if item["source"] in used_sources:
-            continue
+            options = [
+                item for item in candidates
+                if item["source"] in matching_sources
+            ]
 
-        selected.append(item)
-        used_sources.add(item["source"])
+            if not options:
+                continue
 
-        if len(selected) >= top_k:
-            break
+            chosen = max(options, key=lambda item: item["score"])
+
+            if chosen["source"] not in used_sources:
+                selected.append(chosen)
+                used_sources.add(chosen["source"])
+
+            if len(selected) >= top_k:
+                break
+
+        selected.sort(key=lambda item: item["score"], reverse=True)
+
+    else:
+        for item in candidates:
+            if numeric_intent and selected:
+                break
+
+            if item["score"] < best_sentence_score - selection_margin:
+                continue
+
+            if item["source"] in used_sources:
+                continue
+
+            selected.append(item)
+            used_sources.add(item["source"])
+
+            if len(selected) >= top_k:
+                break
 
     if not selected or best_sentence_score < 0.42:
         return {
